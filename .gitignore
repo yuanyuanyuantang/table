@@ -207,6 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 # Project specific
+output/
 images/main.tex
 .lock
 kernel_meta/

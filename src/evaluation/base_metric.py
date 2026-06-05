@@ -169,6 +169,11 @@ class QualityMetric(BaseLLMMetric):
 
     def _create_judge(self, config_key):
         return EvaluationJudgeLLM(ChatClient(config_key=config_key))
+# 曾浩洋修改
+    def _get_true_answer(self, eval_info_item: Dict[str, Any], pair: Any = None) -> str:
+        if pair and getattr(pair, 'score_points', None):
+            return pair.score_points
+        return eval_info_item.get('score_points', '') or eval_info_item.get('answer', '')
 
 @MetricRegistry.register("table_depend")
 class TableDependMetric(BaseMetric):

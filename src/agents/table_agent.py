@@ -8,6 +8,7 @@ import json
 import re
 from enum import Enum
 import os
+import copy
 from datetime import datetime
 from src.agents.context.context_manager import ContextManager
 from src.agents.env_manager import EnvManager
@@ -436,7 +437,9 @@ class TableAgent:
                 last_trace['messages'].extend(messages[idx+1:])
                 self.conversation_trace[-1]['response'] = response
             else:
-                old_messages = last_trace['messages'][:]
+                # 曾浩洋修改
+                # old_messages = last_trace['messages'][:]
+                old_messages = copy.deepcopy(last_trace['messages'])
                 old_messages[0]['content'] = messages[0]['content']
                 self.conversation_trace.append({
                     "turn": self.step_count,
