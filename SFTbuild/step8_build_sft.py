@@ -36,7 +36,10 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from SFTbuild.utils import read_jsonl, write_jsonl, load_samples
+from SFTbuild.utils import (
+    read_jsonl, write_jsonl, load_samples,
+    normalize_paths_in_messages, validate_tool_calls, has_unresolved_absolute_paths,
+)
 
 
 def clean_agent_steps(agent_steps: list) -> list:
@@ -136,18 +139,31 @@ def build_chat_format(sft_sample: dict, system_prompt_template: str = None) -> d
     """
     if system_prompt_template is None:
         system_prompt_template = (
-            "你是一个专业的表格数据分析智能体，能够通过工具调用逐步完成复杂的数据查询任务。\n\n"
-            "## 工作流程\n"
-            "1. 接收用户问题后，先阅读压缩记忆（<MEMORY_BEFORE>）了解已有上下文\n"
-            "2. 制定执行计划（<PLAN>），明确本步要做什么\n"
-            "3. 通过工具调用（tool_call）查找表格、读取数据、执行计算\n"
-            "4. 根据工具返回结果，继续调用工具或给出最终答案\n"
-            "5. 最终答案以 JSON 格式输出在 <ANSWER> 中，包含 'answer' 和 'data_source' 两个字段\n"
-            "6. 更新压缩记忆（<MEMORY_AFTER>），供后续对话轮次使用\n\n"
-            "## 注意事项\n"
-            "- 每次工具调用前先写 <PLAN> 说明意图\n"
-            "- 利用压缩记忆避免重复查询已确认的表格和事实\n"
-            "- 计算时应仔细核对数值，避免单位换算错误"
+            "You are a professional table data analysis expert. Please strictly follow the process and rules below to accurately respond to user table data questions.\n\n"
+            "# I. Role and Core Goal\n"
+            "- **Role**: Professional Table Data Analysis Agent, proficient in table preprocessing, tool combination, and pandas programming.\n"
+            "- **Goal**: Extract accurate information from tables and answer user questions through rigorous thinking and correct tool invocation.\n"
+            "- **Stateless Tools**: The code executor is stateless; each execution is independent and does not retain previous execution results!\n"
+            "- **Thinking + Tool Parallelism**: Think before acting. Output a short, verifiable action plan. Call multiple tools in parallel only when they are independent of each other (i.e., none depends on the output of another).\n\n"
+            "# II. Task Environment\n"
+            "> **Note: Please perform all operations within the environment directory and use absolute paths.**\n"
+            "**Current Working Environment Path**: <TABLE_ROOT>\n"
+            "- <TABLE_ROOT> is the table data root directory assigned for the current task.\n"
+            "- All file operations must use absolute paths starting with <TABLE_ROOT>/.\n"
+            "- Do not guess or fabricate file paths. Use table_selector, grep_search, or cmd_executor to locate tables first.\n"
+            "- Only use file paths confirmed by tool results or compressed memory.\n"
+            "- Do not add extra directory layers like dataset/tables after <TABLE_ROOT>.\n"
+            "File reading/writing and operations outside the <TABLE_ROOT> directory are prohibited.\n\n"
+            "# III. Output Requirements\n"
+            "- **Tool-call responses**: When calling tools, output a short, verifiable plan in <PLAN>...</PLAN> to describe your intent, followed by the tool calls. Keep plans concise — one or two sentences describing what you intend to do and why.\n"
+            "- **Final response**: Output only <ANSWER>...</ANSWER> followed by <MEMORY_AFTER>...</MEMORY_AFTER>. Do NOT include <PLAN> in the final response.\n"
+            "- The final answer is fixed in JSON format within <ANSWER>...</ANSWER>, including two fields: `answer` providing the answer, and `data_source` explaining the source table(s) of the answer:\n"
+            "```json\n"
+            '{"answer": "Answer to the user question, providing the answer in text form.", "data_source": ["Table Name 1", "Table Name 2", ...]}\n'
+            "```\n"
+            "- After the final answer, output compressed memory in <MEMORY_AFTER>...</MEMORY_AFTER> to preserve confirmed tables and key findings for subsequent sub-questions.\n"
+            "- Read <MEMORY_BEFORE>...</MEMORY_BEFORE> at the start of each sub-question to understand previously confirmed context.\n"
+            "- The answer should be concise, directly providing key data and conclusions."
         )
 
     messages = [{"role": "system", "content": system_prompt_template}]
@@ -214,15 +230,28 @@ def build_chat_format(sft_sample: dict, system_prompt_template: str = None) -> d
                 )
                 messages.append({"role": "assistant", "content": assistant_content})
 
-    return {"messages": messages}
+    # Normalize hardcoded paths to <TABLE_ROOT> placeholder
+    messages = normalize_paths_in_messages(messages)
+
+    # Build tools schema (OpenAI function calling format)
+    from src.tools.base import get_tools_schema
+    tools_schema = get_tools_schema()
+    if not tools_schema:
+        raise RuntimeError(
+            "Tool schema is empty — cannot build SFT training data. "
+            "Ensure all tool modules are importable and @register_tool decorators have executed."
+        )
+    tools = json.dumps(tools_schema, ensure_ascii=False)
+
+    return {"messages": messages, "tools": tools}
 
 
 def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser = argparse.ArgumentParser(description='Step 8: Build and export SFT data')
     parser.add_argument('--subquestions', type=str,
-                        default=os.path.join(project_root, 'SFTbuild', 'output', 'passed_subquestions.jsonl'),
-                        help='Path to passed_subquestions.jsonl from step4 (or step7 if memory enabled)')
+                        default=os.path.join(project_root, 'SFTbuild', 'output', 'memory_verified_subquestions.jsonl'),
+                        help='Path to memory_verified_subquestions.jsonl from step7')
     parser.add_argument('--samples', type=str,
                         default=os.path.join(project_root, 'dataset', 'samples_normal_easy.json'),
                         help='Path to samples JSON (optional, for task/table_path metadata)')
@@ -239,6 +268,17 @@ def main():
     if not records:
         print(f"[ERROR] No records in {args.subquestions}")
         sys.exit(1)
+
+    # ---- Early check: tools registry must be populated ----
+    # If tool modules fail to import, get_tools_schema() returns [] and every
+    # dialog will be silently skipped.  Fail early with a clear error.
+    from src.tools.base import get_tools_schema
+    tools_schema = get_tools_schema()
+    if not tools_schema:
+        print("[FATAL] Tool registry is empty — no tools are registered.")
+        print("  Check that all tool modules under src/tools/ are importable")
+        print("  and that @register_tool decorators have executed.")
+        sys.exit(2)
 
     # 加载 samples 获取元信息
     sample_map = {}
@@ -260,27 +300,108 @@ def main():
     sft_samples = []
     chat_samples = []
     skipped = 0
+    cleaned_skipped = 0
 
-    for (sample_id, candidate_id), sub_recs in dialogs.items():
+    for dialog_idx, ((sample_id, candidate_id), sub_recs) in enumerate(dialogs.items()):
         # 只保留全部子问题质量达标的 dialog：
+        #   _dialog_pass: step4/5 dialog 级完整（子问题数一致等）
         #   _sq_pass: step4 子问题级通过
         #   _repaired: step5 修复成功
         #   _memory_verified: step7 记忆验证通过
-        if not all((r.get('_sq_pass') or r.get('_repaired')) and r.get('_memory_verified', True) for r in sub_recs):
+        # ---- 质量门禁 1: Dialog 级完整性 ----
+        # _dialog_pass from step4/5 is based on the original dialog. After step7
+        # drops records (memory verification failed), the flag can be stale.
+        # Re-verify completeness against the sample's checkout_list.
+        sample = sample_map.get(sample_id, {})
+        checkout_list = sample.get('design', {}).get('checkout_list', [])
+        expected_count = len(checkout_list)
+        actual_count = len(sub_recs)
+
+        if expected_count <= 0:
             skipped += 1
             if args.verbose:
-                n_bad = sum(1 for r in sub_recs if not ((r.get('_sq_pass') or r.get('_repaired')) and r.get('_memory_verified', True)))
+                print(f"  [SKIP] {candidate_id[:50]}... : "
+                      f"sample_id not found in samples JSON — cannot verify dialog completeness")
+            continue
+
+        actual_ids = {r.get('subquestion_id') for r in sub_recs}
+        expected_ids = set(range(1, expected_count + 1))
+        id_ok = (actual_ids == expected_ids)
+        if not id_ok:
+            skipped += 1
+            if args.verbose:
+                missing = expected_ids - actual_ids
+                extra = actual_ids - expected_ids
+                detail = []
+                if missing:
+                    detail.append(f'missing sq={sorted(missing)}')
+                if extra:
+                    detail.append(f'extra sq={sorted(extra)}')
+                print(f"  [SKIP] {candidate_id[:50]}... : "
+                      f"dialog incomplete — {', '.join(detail)}")
+            continue
+
+        # ---- 质量门禁 2: 子问题级通过状态 ----
+        if not all((r.get('_sq_pass') or r.get('_repaired')) and r.get('_memory_verified', False) for r in sub_recs):
+            skipped += 1
+            if args.verbose:
+                n_bad = sum(1 for r in sub_recs if not ((r.get('_sq_pass') or r.get('_repaired')) and r.get('_memory_verified', False)))
                 print(f"  [SKIP] {candidate_id[:50]}... : {n_bad} sub-questions unrepaired or unverified")
             continue
 
-        sample = sample_map.get(sample_id, {})
+        # ---- 质量门禁 3: 不允许有任何 _repair_error ----
+        repair_errors = [r.get('_repair_error') for r in sub_recs if r.get('_repair_error') is not None]
+        if repair_errors:
+            skipped += 1
+            if args.verbose:
+                print(f"  [SKIP] {candidate_id[:50]}... : _repair_error in sub-questions: {repair_errors[:3]}")
+            continue
+
+        # ============================================================
+        # Trajectory must be cleaned before memory generation (step55).
+        # Step8 only verifies the flag — no secondary modification.
+        # ============================================================
+        if not all(r.get('_trajectory_cleaned', False) for r in sub_recs):
+            cleaned_skipped += 1
+            if args.verbose:
+                n_bad = sum(1 for r in sub_recs if not r.get('_trajectory_cleaned', False))
+                print(f"  [SKIP] {candidate_id[:50]}... : {n_bad} sub-questions not trajectory-cleaned")
+            continue
+
+        # ---- 质量门禁 4: 清洗后工具调用校验 ----
+        all_tool_issues = []
+        for r in sub_recs:
+            steps = r.get('agent_steps', [])
+            issues = validate_tool_calls(steps)
+            if issues:
+                all_tool_issues.extend([f"sq{r.get('subquestion_id', '?')}: {i}" for i in issues])
+        if all_tool_issues:
+            skipped += 1
+            if args.verbose:
+                print(f"  [SKIP] {candidate_id[:50]}... : tool_call validation failed after cleaning:")
+                for issue in all_tool_issues[:5]:
+                    print(f"    - {issue}")
+            continue
+
+        # ============================================================
+
         task = sample.get('task', sample_id)
         table_path = sample.get('table_path', sample.get('file_path', ''))
 
         sft_sample = build_sft_sample(sample_id, task, table_path, sub_recs)
-        sft_samples.append(sft_sample)
-
         chat_sample = build_chat_format(sft_sample)
+
+        # ---- 质量门禁 5: chat format 中不允许残留未归一化路径 ----
+        unresolved = has_unresolved_absolute_paths(chat_sample['messages'])
+        if unresolved:
+            skipped += 1
+            if args.verbose:
+                print(f"  [SKIP] {candidate_id[:50]}... : unresolved absolute paths:")
+                for issue in unresolved[:3]:
+                    print(f"    - {issue}")
+            continue
+
+        sft_samples.append(sft_sample)
         chat_samples.append(chat_sample)
 
         if args.verbose:
@@ -293,11 +414,35 @@ def main():
     write_jsonl(args.output, sft_samples)
     write_jsonl(args.output_chat, chat_samples)
 
+    total_dialogs = len(dialogs)
+    produced = len(sft_samples)
+    skip_rate = (total_dialogs - produced) / max(total_dialogs, 1)
+
     print(f"\nDone.")
     if skipped:
-        print(f"  Skipped: {skipped} dialogs (sub-questions not all passed/repaired)")
-    print(f"  SFT dialogs:     {len(sft_samples)} → {args.output}")
+        print(f"  Skipped (quality gates): {skipped} dialogs")
+    if cleaned_skipped:
+        print(f"  Skipped (trajectory not cleaned): {cleaned_skipped} dialogs")
+    print(f"  SFT dialogs:     {produced}/{total_dialogs} → {args.output}")
     print(f"  Chat format:     {len(chat_samples)} → {args.output_chat}")
+
+    # ---- Exit code: fail if no SFT data was produced from non-empty input ----
+    if produced == 0:
+        print(f"\n[FATAL] 0 SFT dialogs produced from {total_dialogs} input dialogs "
+              f"({len(records)} sub-questions).")
+        if skipped == total_dialogs:
+            print("  All dialogs were rejected by quality gates. Check:")
+            print("    - _dialog_pass flag (set by step4/5)")
+            print("    - _sq_pass / _repaired flags (set by step4/5)")
+            print("    - _memory_verified flag (set by step7)")
+            print("    - Tool call validation (validate_tool_calls)")
+            print("    - Unresolved absolute paths in chat format")
+        sys.exit(3)
+
+    # ---- Warning: abnormally high skip rate ----
+    if skip_rate > 0.8:
+        print(f"\n[WARN] High skip rate: {skip_rate:.0%} of dialogs rejected. "
+              f"Only {produced} SFT samples produced.")
 
 
 if __name__ == '__main__':

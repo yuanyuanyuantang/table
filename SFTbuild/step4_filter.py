@@ -27,16 +27,35 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from SFTbuild.utils import read_jsonl, write_jsonl, load_samples
+from SFTbuild.utils import read_jsonl, write_jsonl, load_samples, validate_assistant_answer
 
 
 def check_data_source_coverage(model_tables: list, true_tables: list) -> dict:
     """
     检查 model 的 data_source 是否覆盖 gold related_tables。
-    用 basename 比较。
+    用 basename 比较。防御性处理非法类型（int/None/dict）。
     """
-    model_basenames = set(os.path.basename(t) for t in (model_tables or []))
-    true_basenames = set(os.path.basename(t) for t in (true_tables or []))
+    model_tables = model_tables or []
+    true_tables = true_tables or []
+
+    # Validate model_tables: must be non-empty strings
+    invalid = [x for x in model_tables
+               if not isinstance(x, str) or not x.strip()]
+    if invalid:
+        return {
+            'covered': False,
+            'missing': list(true_tables),
+            'model_basenames': [],
+            'true_basenames': [os.path.basename(t)
+                               for t in true_tables
+                               if isinstance(t, str) and t.strip()],
+            'error': 'data_source contains invalid non-string or empty entries',
+        }
+
+    model_basenames = set(os.path.basename(t) for t in model_tables)
+    true_basenames = set(os.path.basename(t)
+                         for t in true_tables
+                         if isinstance(t, str) and t.strip())
 
     if not true_basenames:
         return {'covered': True, 'missing': [], 'model_basenames': list(model_basenames)}
@@ -86,7 +105,7 @@ def filter_subquestion(rec: dict, sample: dict = None) -> dict:
         issues.append('format: data_source is empty')
 
     # ---- 4. data_source coverage ----
-    answer = rec.get('assistant_answer', {})
+    answer, _format_issues = validate_assistant_answer(rec.get('assistant_answer', {}))
     model_ds = answer.get('data_source', []) or []
 
     # Try to get related_tables from sample
@@ -98,7 +117,9 @@ def filter_subquestion(rec: dict, sample: dict = None) -> dict:
             true_tables = checkout_list[sub_idx].get('related_tables', []) or []
 
     ds_check = check_data_source_coverage(model_ds, true_tables)
-    if not ds_check['covered']:
+    if ds_check.get('error'):
+        issues.append(f'data_source: {ds_check["error"]}')
+    elif not ds_check['covered']:
         issues.append(f'data_source: missing tables {ds_check["missing"]}')
 
     # ---- 5. tool errors ----
@@ -106,12 +127,21 @@ def filter_subquestion(rec: dict, sample: dict = None) -> dict:
     if tool_audit.get('unrecovered_error_count', 0) > 0:
         issues.append(f'tool: {tool_audit["unrecovered_error_count"]} unrecovered errors')
 
-    # ---- 6. completeness ----
+    # ---- 6. completeness (structural integrity) ----
     agent_steps = rec.get('agent_steps', [])
     has_final = any(s.get('type') == 'final_answer' for s in agent_steps)
     has_evidence = any(s.get('type') == 'tool_call' for s in agent_steps)
+
     if not has_final:
         issues.append('completeness: no final_answer step')
+    else:
+        # 确保恰好一个 final_answer 且位于最后
+        fa_indices = [i for i, s in enumerate(agent_steps) if s.get('type') == 'final_answer']
+        if len(fa_indices) > 1:
+            issues.append(f'completeness: {len(fa_indices)} final_answer steps (expected exactly 1)')
+        if fa_indices and fa_indices[-1] != len(agent_steps) - 1:
+            issues.append(f'completeness: final_answer is not the last step (at index {fa_indices[-1]}, total {len(agent_steps)} steps)')
+
     if not has_evidence:
         # 可接受：纯基于前文 memory 回答
         pass
@@ -176,8 +206,9 @@ def filter_dialogs(records: list, samples: list, verbose: bool = False) -> tuple
             all_pass = False
         elif checkout_len == 0:
             dialog_issues.append(f'sample not found or checkout_list empty, cannot verify subquestion count')
+            all_pass = False  # Cannot verify completeness → fail closed
             if verbose:
-                print(f"  [WARN] {candidate_id}: checkout_len=0, count check skipped")
+                print(f"  [WARN] {candidate_id}: checkout_len=0, count check skipped → dialog FAIL")
 
         dialog_audit = {
             'sample_id': sample_id,
@@ -190,10 +221,12 @@ def filter_dialogs(records: list, samples: list, verbose: bool = False) -> tuple
         }
         audit_records.append(dialog_audit)
 
+        # Persist dialog-level pass/fail on every sub-record so downstream
+        # steps (step5/step8) can enforce dialog completeness.
+        for rec in sub_recs:
+            rec['_dialog_pass'] = all_pass
+
         if all_pass:
-            # 将通过筛选的子问题标记为 passed
-            for rec in sub_recs:
-                rec['_pass'] = True
             passed_records.extend(sub_recs)
 
         if verbose:
@@ -219,7 +252,7 @@ def main():
     parser.add_argument('--output_pass', type=str,
                         default=os.path.join(os.path.dirname(__file__), 'output', 'passed_subquestions.jsonl'),
                         help='Output passed sub-questions JSONL path')
-    parser.add_argument('--verbose', '-v', action='store_true', default=True)
+    parser.add_argument('--verbose', '-v', action='store_true', default=False)
     args = parser.parse_args()
 
     records = read_jsonl(args.subquestions)

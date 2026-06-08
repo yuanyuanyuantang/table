@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from SFTbuild.utils import (
     load_trace, load_samples, get_full_messages, find_sample,
     find_user_anchors, parse_agent_steps, parse_final_answer,
-    write_jsonl, normalize_text
+    write_jsonl, normalize_text, validate_assistant_answer
 )
 
 
@@ -101,24 +101,36 @@ def decompose_trace(trace: dict, sample: dict, trace_id: str, verbose: bool = Fa
 
         # 提取 final_answer
         final_answer = {'answer': '', 'data_source': []}
-        for step in reversed(agent_steps):
+        fa_step_idx = None  # track the existing final_answer step index
+        for step_idx, step in reversed(list(enumerate(agent_steps))):
             if step['type'] == 'final_answer':
-                final_answer = step.get('assistant_answer', final_answer)
+                raw = step.get('assistant_answer', None)
+                if isinstance(raw, dict):
+                    final_answer = raw
+                fa_step_idx = step_idx
                 break
 
-        # 如果没有 final_answer step，尝试从 span 最后一条 assistant 消息提取
+        # If the parsed final_answer is empty, try extracting from the last
+        # assistant message in the span and update the existing step in-place
+        # instead of appending a duplicate.
         if final_answer['answer'] == '':
             for msg in reversed(span_messages):
                 if msg.get('role') == 'assistant' and not msg.get('tool_calls'):
                     content = msg.get('content', '')
                     if content:
                         final_answer = parse_final_answer(content)
-                        agent_steps.append({
-                            'agent_step_id': len(agent_steps) + 1,
-                            'type': 'final_answer',
-                            'assistant_answer': final_answer
-                        })
+                        if fa_step_idx is not None:
+                            agent_steps[fa_step_idx]['assistant_answer'] = final_answer
+                        else:
+                            agent_steps.append({
+                                'agent_step_id': len(agent_steps) + 1,
+                                'type': 'final_answer',
+                                'assistant_answer': final_answer
+                            })
                     break
+
+        # Normalize to canonical form: {"answer": "<str>", "data_source": ["<str>",...]}
+        final_answer, _ = validate_assistant_answer(final_answer)
 
         records.append({
             'sample_id': sample.get('task', ''),
@@ -145,7 +157,7 @@ def main():
     parser.add_argument('--output', type=str,
                         default=os.path.join(os.path.dirname(__file__), 'output', 'aligned_subquestions.jsonl'),
                         help='Output JSONL path')
-    parser.add_argument('--verbose', '-v', action='store_true', default=True,
+    parser.add_argument('--verbose', '-v', action='store_true', default=False,
                         help='Verbose output')
     args = parser.parse_args()
 

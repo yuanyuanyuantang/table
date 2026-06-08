@@ -27,7 +27,8 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from SFTbuild.utils import (
-    load_trace, read_jsonl, write_jsonl, audit_tool_errors
+    load_trace, read_jsonl, write_jsonl, audit_tool_errors,
+    validate_assistant_answer
 )
 
 
@@ -56,28 +57,36 @@ def align_evaluation(records: list, trace_dir: str, verbose: bool = False) -> li
         table_depend = None
 
         acc_steps = ev.get('accuracy_steps', [])
-        if sub_idx < len(acc_steps):
+        if sub_idx < len(acc_steps) and acc_steps[sub_idx] is not None:
             accuracy = acc_steps[sub_idx].get('accuracy', {})
 
         qual_steps = ev.get('quality_steps', [])
-        if sub_idx < len(qual_steps):
+        if sub_idx < len(qual_steps) and qual_steps[sub_idx] is not None:
             quality = qual_steps[sub_idx].get('quality', {})
 
         td_steps = ev.get('table_depend_steps', [])
-        if sub_idx < len(td_steps):
+        if sub_idx < len(td_steps) and td_steps[sub_idx] is not None:
             table_depend = td_steps[sub_idx].get('table_depend', {})
 
         # 工具审计：从 agent_steps 重新解析
         tool_audit = audit_tool_errors(rec.get('agent_steps', []))
 
-        # 格式审计
-        answer = rec.get('assistant_answer', {})
-        answer_text = answer.get('answer', '')
-        data_source = answer.get('data_source', [])
+        # 格式审计 — validate before accessing .get() to avoid crashes
+        # on non-dict assistant_answer (e.g. int, None, list)
+        answer, format_issues = validate_assistant_answer(rec.get('assistant_answer', {}))
         format_audit = {
-            'answer_json_valid': isinstance(answer, dict) and 'answer' in answer,
-            'has_answer': bool(answer_text),
-            'has_data_source': bool(data_source)
+            'answer_json_valid': not any('assistant_answer is not a dict' in i for i in format_issues),
+            'has_answer': (
+                isinstance(answer.get('answer'), str)
+                and bool(answer['answer'].strip())
+            ),
+            'has_data_source': (
+                isinstance(answer.get('data_source'), list)
+                and len(answer['data_source']) > 0
+                and all(isinstance(x, str) and x.strip()
+                        for x in answer['data_source'])
+            ),
+            'format_issues': format_issues,
         }
 
         rec['eval'] = {
@@ -110,7 +119,7 @@ def main():
     parser.add_argument('--output', type=str,
                         default=os.path.join(os.path.dirname(__file__), 'output', 'evaluated_subquestions.jsonl'),
                         help='Output JSONL path')
-    parser.add_argument('--verbose', '-v', action='store_true', default=True)
+    parser.add_argument('--verbose', '-v', action='store_true', default=False)
     args = parser.parse_args()
 
     records = read_jsonl(args.subquestions)
