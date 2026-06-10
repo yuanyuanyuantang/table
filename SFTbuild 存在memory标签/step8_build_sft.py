@@ -125,56 +125,17 @@ def build_sft_sample(sample_id: str, task: str, table_path: str,
     }
 
 
-def _format_memory_as_text(memory: dict) -> str:
-    """将结构化 memory 转为自然语言文本，放入 system prompt 的 conversation_history。"""
-    if not memory:
-        return ''
-
-    parts = []
-    goal = memory.get('goal', '')
-    if goal:
-        parts.append(f"任务目标：{goal}")
-
-    tables = memory.get('tables', [])
-    if tables:
-        table_strs = []
-        for t in tables:
-            if isinstance(t, dict):
-                table_strs.append(f"{t.get('name', '')}（{t.get('content', '')}）")
-            else:
-                table_strs.append(str(t))
-        parts.append(f"已确认表格：{'；'.join(table_strs)}")
-
-    facts = memory.get('facts', [])
-    if facts:
-        parts.append(f"关键数据：{'；'.join(facts)}")
-
-    derived = memory.get('derived', [])
-    if derived:
-        parts.append(f"计算结果：{'；'.join(derived)}")
-
-    constraints = memory.get('constraints', [])
-    if constraints:
-        parts.append(f"约束条件：{'；'.join(constraints)}")
-
-    pitfalls = memory.get('pitfalls', [])
-    if pitfalls:
-        parts.append(f"注意事项：{'；'.join(pitfalls)}")
-
-    return '\n'.join(parts)
-
-
 def build_chat_format(sft_sample: dict, system_prompt_template: str = None) -> dict:
     """
     将 SFT 样本转为 chat format（messages 列表），用于训练。
 
-    格式与 benchmark 对齐：
-      system: benchmark-compatible 表格 agent 规则（含 conversation_history 占位）
-      user: [可选：上一轮的压缩 memory 作为上下文] + 问题文本
-      assistant: plan 文本（无标签）+ tool_calls
+    每轮格式:
+      system: 表格 agent 规则 + 工具规则 + JSON answer 约束
+      user: <MEMORY_BEFORE>...</MEMORY_BEFORE>\n<QUESTION>...</QUESTION>
+      assistant: <PLAN>...</PLAN>\ntool_call(...)
       tool: 工具返回
       ...
-      assistant: {"answer": "...", "data_source": [...]}（纯 JSON，无标签）
+      assistant: <ANSWER>{...}</ANSWER>\n<MEMORY_AFTER>{...}</MEMORY_AFTER>
     """
     if system_prompt_template is None:
         system_prompt_template = (
@@ -183,56 +144,50 @@ def build_chat_format(sft_sample: dict, system_prompt_template: str = None) -> d
             "- **Role**: Professional Table Data Analysis Agent, proficient in table preprocessing, tool combination, and pandas programming.\n"
             "- **Goal**: Extract accurate information from tables and answer user questions through rigorous thinking and correct tool invocation.\n"
             "- **Stateless Tools**: The code executor is stateless; each execution is independent and does not retain previous execution results!\n"
-            "- **Thinking + Tool Parallelism**: You need to think fully before calling tools, while maximizing the parallelism of tool calls to accelerate problem solving.\n\n"
+            "- **Thinking + Tool Parallelism**: Think before acting. Output a short, verifiable action plan. Call multiple tools in parallel only when they are independent of each other (i.e., none depends on the output of another).\n\n"
             "# II. Task Environment\n"
             "> **Note: Please perform all operations within the environment directory and use absolute paths.**\n"
-            "**Current Working Environment Path**: <TABLE_ROOT>, please ensure to use the full path for all operations to avoid path errors. File reading/writing and operations outside the /tmp directory are prohibited.\n\n"
+            "**Current Working Environment Path**: <TABLE_ROOT>\n"
+            "- <TABLE_ROOT> is the table data root directory assigned for the current task.\n"
+            "- All file operations must use absolute paths starting with <TABLE_ROOT>/.\n"
+            "- Do not guess or fabricate file paths. Use table_selector, grep_search, or cmd_executor to locate tables first.\n"
+            "- Only use file paths confirmed by tool results or compressed memory.\n"
+            "- Do not add extra directory layers like dataset/tables after <TABLE_ROOT>.\n"
+            "File reading/writing and operations outside the <TABLE_ROOT> directory are prohibited.\n\n"
             "# III. Output Requirements\n"
-            "- **Tool-call responses**: When calling tools, first describe your action plan briefly, then output tool calls. Keep plans concise — describe what you intend to do, why, and how (which tools/tables to use).\n"
-            "- **Final response**: Output the answer in JSON format including two fields: `answer` providing the answer, and `data_source` explaining the source table(s) of the answer:\n"
+            "- **Tool-call responses**: When calling tools, output a short, verifiable plan in <PLAN>...</PLAN> to describe your intent, followed by the tool calls. Keep plans concise — describe what you intend to do, why, and how (which tools/tables to use).\n"
+            "- **Final response**: Output only <ANSWER>...</ANSWER> followed by <MEMORY_AFTER>...</MEMORY_AFTER>. Do NOT include <PLAN> in the final response.\n"
+            "- The final answer is fixed in JSON format within <ANSWER>...</ANSWER>, including two fields: `answer` providing the answer, and `data_source` explaining the source table(s) of the answer:\n"
             "```json\n"
             '{"answer": "Answer to the user question, providing the answer in text form.", "data_source": ["Table Name 1", "Table Name 2", ...]}\n'
             "```\n"
-            "- The answer should be concise, directly providing key data and conclusions.\n\n"
-            "# IV. Historical Context\n"
-            "{conversation_history}"
+            "- After the final answer, output compressed memory in <MEMORY_AFTER>...</MEMORY_AFTER> to preserve confirmed tables and key findings for subsequent sub-questions.\n"
+            "- Read <MEMORY_BEFORE>...</MEMORY_BEFORE> at the start of each sub-question to understand previously confirmed context.\n"
+            "- The answer should be concise, directly providing key data and conclusions."
         )
 
     messages = [{"role": "system", "content": system_prompt_template}]
 
     for turn in sft_sample.get('dialog_turns', []):
-        # ---- User message: memory context + question ----
-        mem_before = turn.get('memory_before', {})
-        memory_text = _format_memory_as_text(mem_before)
-        user_content = turn.get('user', '')
-        if memory_text:
-            # 将 memory 放入 system prompt 的 conversation_history 位置，
-            # 问题本身作为 user message
-            # 更新 system prompt 中的 conversation_history
-            system_with_memory = system_prompt_template.replace(
-                '{conversation_history}', memory_text
-            )
-            messages[-1] = {"role": "system", "content": system_with_memory}
-        else:
-            # 第一轮没有 memory，清空 conversation_history
-            system_no_memory = system_prompt_template.replace(
-                '{conversation_history}', '(No prior context — this is the first sub-question.)'
-            )
-            messages[-1] = {"role": "system", "content": system_no_memory}
-
+        # User message: memory_before + question
+        mem_before = json.dumps(turn.get('memory_before', {}), ensure_ascii=False, indent=2)
+        user_content = (
+            f"<MEMORY_BEFORE>\n{mem_before}\n</MEMORY_BEFORE>\n\n"
+            f"<QUESTION>\n{turn.get('user', '')}\n</QUESTION>"
+        )
         messages.append({"role": "user", "content": user_content})
 
-        # ---- Assistant + Tool messages ----
+        # Assistant + Tool messages
         for step in turn.get('agent_steps', []):
             if step['type'] == 'tool_call':
-                # Assistant: plan as natural text (no <PLAN> tags)
+                # Assistant: PLAN + tool_calls
                 plan = step.get('step_plan', '')
-                assistant_content = plan if plan else ""
+                assistant_content = f"<PLAN>{plan}</PLAN>" if plan else ""
                 assistant_msg = {
                     "role": "assistant",
                     "content": assistant_content
                 }
-                # tool_calls in OpenAI format
+                # tool_calls 以 OpenAI format 存储
                 tc_list = []
                 for tc in step.get('tool_calls', []):
                     if isinstance(tc, dict):
@@ -266,10 +221,14 @@ def build_chat_format(sft_sample: dict, system_prompt_template: str = None) -> d
                     })
 
             elif step['type'] == 'final_answer':
-                # Final answer: plain JSON, no <ANSWER> / <MEMORY_AFTER> tags
                 ans = step.get('assistant_answer', {})
                 answer_json = json.dumps(ans, ensure_ascii=False)
-                messages.append({"role": "assistant", "content": answer_json})
+                mem_after = json.dumps(turn.get('memory_after', {}), ensure_ascii=False, indent=2)
+                assistant_content = (
+                    f"<ANSWER>\n{answer_json}\n</ANSWER>\n"
+                    f"<MEMORY_AFTER>\n{mem_after}\n</MEMORY_AFTER>"
+                )
+                messages.append({"role": "assistant", "content": assistant_content})
 
     # Normalize hardcoded paths to <TABLE_ROOT> placeholder
     messages = normalize_paths_in_messages(messages)

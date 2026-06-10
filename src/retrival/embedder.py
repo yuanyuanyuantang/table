@@ -169,6 +169,8 @@ class Embedder:
                     ).to(self._device)
                     outputs = self._model(**batch_dict, use_cache=False)
                     embeddings = self._last_token_pool(outputs.last_hidden_state, batch_dict['attention_mask'])
+                #    曾浩洋修改：部分模型（如Qwen3-Embedding-8B）在某些设备上可能会以BFloat16格式输出，需要转换为Float32以确保兼容性和正确的相似度计算
+                    embeddings = embeddings.float()  # BFloat16 → Float32 for CPU compatibility
                     embeddings = F.normalize(embeddings, p=2, dim=1)
                     batch_emb_numpy = embeddings.cpu().numpy()
                     if result_embeddings is None:
