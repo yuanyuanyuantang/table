@@ -13,7 +13,6 @@ Step 4: 候选 Trace 筛选。
   - accuracy.coverage_ratio == 1.0
   - table_depend.recall == 1.0
   - answer JSON 可解析、非空
-  - data_source 覆盖 checkout_list[i].related_tables（LLM 判断，复刻 benchmark TableDependMetric）
   - unrecovered_error_count == 0
 
 筛选逻辑 —— dialog 级:
@@ -30,128 +29,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from SFTbuild.utils import read_jsonl, write_jsonl, load_samples, validate_assistant_answer
 
 
-def _build_ds_coverage_prompts(dialogs: dict, sample_map: dict):
-    """
-    收集所有 data_source → related_tables 配对，构造 LLM batch 请求。
-
-    Returns:
-        prompts: 格式化后的 TABLE_COVERAGE_EVAL_PROMPT 列表
-        keys: [(candidate_id, subquestion_id), ...]
-        metadata: [{model_basenames, true_basenames, true_count}, ...]
-    """
-    from src.prompts.AgentEvalPrompt import TABLE_COVERAGE_EVAL_PROMPT
-
-    prompts, keys, metadata = [], [], []
-
-    for (sample_id, candidate_id), sub_recs in dialogs.items():
-        sample = sample_map.get(sample_id, {})
-        checkout_list = sample.get('design', {}).get('checkout_list', [])
-        for rec in sorted(sub_recs, key=lambda r: r.get('subquestion_id', 0)):
-            sq_id = rec.get('subquestion_id', 1)
-            answer, _ = validate_assistant_answer(rec.get('assistant_answer', {}))
-            model_ds = answer.get('data_source', []) or []
-            sub_idx = sq_id - 1
-            true_tables = []
-            if sub_idx < len(checkout_list):
-                true_tables = checkout_list[sub_idx].get('related_tables', []) or []
-
-            # 与 benchmark TableDependMetric 一致：取 basename
-            model_basenames = [os.path.basename(t) for t in model_ds
-                               if isinstance(t, str) and t.strip()]
-            true_basenames = [os.path.basename(t) for t in true_tables]
-
-            pred_str = "\n".join(f"- {t}" for t in model_basenames) if model_basenames else "None"
-            true_str = "\n".join(f"- {t}" for t in true_basenames) if true_basenames else "None"
-
-            prompts.append(TABLE_COVERAGE_EVAL_PROMPT.format(
-                true_tables=true_str, pred_tables=pred_str))
-            keys.append((candidate_id, sq_id))
-            metadata.append({
-                'model_basenames': model_basenames,
-                'true_basenames': true_basenames,
-                'true_count': len(true_basenames),
-            })
-
-    return prompts, keys, metadata
-
-
-def _batch_check_data_source_coverage(dialogs: dict, sample_map: dict,
-                                       config_key: str = 'mimo',
-                                       verbose: bool = False) -> dict:
-    """
-    使用 LLM 批量检查 data_source 覆盖率，完全复刻 benchmark TableDependMetric。
-
-    Returns:
-        {(candidate_id, subquestion_id): {
-            'covered': bool,
-            'missing': [...],
-            'model_basenames': [...],
-            'true_basenames': [...],
-            'reasoning': str,
-        }}
-    """
-    prompts, keys, meta_list = _build_ds_coverage_prompts(dialogs, sample_map)
-
-    if not prompts:
-        return {}
-
-    from src.utils.chat_api import ChatClient
-    client = ChatClient(config_key=config_key)
-
-    if verbose:
-        print(f"  [LLM] Checking data_source coverage for {len(prompts)} sub-questions...")
-
-    responses = client.batch_chat(
-        prompts, temperature=0.0,
-        response_format={"type": "json_object"},
-        threads=10, batch_size=20,
-        verbose=verbose,
-    )
-
-    results = {}
-    for (key, meta, resp) in zip(keys, meta_list, responses):
-        try:
-            result_json = json.loads(resp['content'])
-            if not isinstance(result_json, dict):
-                result_json = {"reasoning": "Parse Error", "covered_true_count": 0, "correct_pred_count": 0}
-        except Exception:
-            result_json = {"reasoning": "Exception Error", "covered_true_count": 0, "correct_pred_count": 0}
-
-        covered_count = result_json.get("covered_true_count",
-                                        result_json.get("covered_count", 0))
-        total_true = meta['true_count']
-
-        # 计算 missing（LLM 判定未覆盖的 true table）
-        missing = []
-        if covered_count < total_true:
-            # LLM 不直接返回 missing 列表，保守标记全部为潜在缺失
-            missing = meta['true_basenames']
-
-        results[key] = {
-            'covered': covered_count >= total_true,
-            'missing': missing,
-            'model_basenames': meta['model_basenames'],
-            'true_basenames': meta['true_basenames'],
-            'llm_reasoning': result_json.get('reasoning', ''),
-            'covered_true_count': covered_count,
-            'total_true': total_true,
-        }
-
-    return results
-
-
-def filter_subquestion(rec: dict, sample: dict = None,
-                       ds_coverage: dict = None) -> dict:
+def filter_subquestion(rec: dict, sample: dict = None) -> dict:
     """
     对单条子问题记录做筛选，返回 issue 列表和 pass 状态。
 
-    ds_coverage: 预计算的 LLM data_source 覆盖结果（由 _batch_check_data_source_coverage 生成），
-                 若为 None 则跳过 data_source 检查。
+    所有检查信任 benchmark 评估结果（accuracy、table_depend 均为 benchmark LLM 判断）。
     """
     issues = []
     ev = rec.get('eval', {})
 
-    # ---- 1. accuracy coverage ----
+    # ---- 1. accuracy coverage (benchmark 评估结果) ----
     accuracy = ev.get('accuracy') or {}
     is_missing = accuracy.get('is_missing', False)
     coverage = accuracy.get('coverage_ratio')
@@ -162,7 +49,7 @@ def filter_subquestion(rec: dict, sample: dict = None,
     elif coverage < 0.999:
         issues.append(f'accuracy: coverage_ratio={coverage} < 1.0')
 
-    # ---- 2. table recall (benchmark LLM 判断) ----
+    # ---- 2. table depend (benchmark LLM 判断，含 data_source 覆盖) ----
     td = ev.get('table_depend') or {}
     recall = td.get('recall')
     if recall is None:
@@ -179,29 +66,12 @@ def filter_subquestion(rec: dict, sample: dict = None,
     if not fmt.get('has_data_source'):
         issues.append('format: data_source is empty')
 
-    # ---- 4. data_source coverage (LLM 判断，复刻 benchmark) ----
-    ds_check = {}
-    if ds_coverage is not None:
-        key = (rec.get('candidate_id', ''), rec.get('subquestion_id', 1))
-        ds_check = ds_coverage.get(key)
-        if ds_check is None:
-            issues.append('data_source: no LLM coverage result')
-        elif not ds_check.get('covered'):
-            missing = ds_check.get('missing', [])
-            if missing:
-                issues.append(f'data_source: missing tables {missing}')
-            else:
-                issues.append('data_source: LLM judged incomplete coverage')
-    else:
-        # 回退：不做 data_source 检查（不应发生）
-        ds_check = {'covered': True, 'missing': [], 'fallback': True}
-
-    # ---- 5. tool errors ----
+    # ---- 4. tool errors ----
     tool_audit = ev.get('tool_audit', {})
     if tool_audit.get('unrecovered_error_count', 0) > 0:
         issues.append(f'tool: {tool_audit["unrecovered_error_count"]} unrecovered errors')
 
-    # ---- 6. completeness (structural integrity) ----
+    # ---- 5. completeness (structural integrity) ----
     agent_steps = rec.get('agent_steps', [])
     has_final = any(s.get('type') == 'final_answer' for s in agent_steps)
     has_evidence = any(s.get('type') == 'tool_call' for s in agent_steps)
@@ -221,12 +91,10 @@ def filter_subquestion(rec: dict, sample: dict = None,
     return {
         'pass': len(issues) == 0,
         'issues': issues,
-        'data_source_check': ds_check
     }
 
 
-def filter_dialogs(records: list, samples: list, verbose: bool = False,
-                   config_key: str = 'mimo') -> tuple:
+def filter_dialogs(records: list, samples: list, verbose: bool = False) -> tuple:
     """
     对子问题 + dialog 级别做筛选。
     返回 (audit_records, passed_records)
@@ -242,11 +110,6 @@ def filter_dialogs(records: list, samples: list, verbose: bool = False,
         key = (rec.get('sample_id', ''), rec.get('candidate_id', ''))
         dialogs.setdefault(key, []).append(rec)
 
-    # ---- 批量 LLM 检查 data_source 覆盖率 ----
-    ds_coverage = _batch_check_data_source_coverage(dialogs, sample_map,
-                                                     config_key=config_key,
-                                                     verbose=verbose)
-
     audit_records = []
     passed_records = []
 
@@ -261,13 +124,12 @@ def filter_dialogs(records: list, samples: list, verbose: bool = False,
         sub_audits = []
         all_pass = True
         for rec in sorted(sub_recs, key=lambda r: r.get('subquestion_id', 0)):
-            audit = filter_subquestion(rec, sample, ds_coverage=ds_coverage)
+            audit = filter_subquestion(rec, sample)
             sub_audits.append({
                 'subquestion_id': rec.get('subquestion_id'),
                 'user': rec.get('user', ''),
                 'pass': audit['pass'],
                 'issues': audit['issues'],
-                'data_source_check': audit['data_source_check']
             })
             rec['_sq_pass'] = audit['pass']
             if not audit['pass']:
@@ -324,8 +186,6 @@ def main():
     parser.add_argument('--output_pass', type=str,
                         default=os.path.join(os.path.dirname(__file__), 'output', 'passed_subquestions.jsonl'),
                         help='Output passed sub-questions JSONL path')
-    parser.add_argument('--config_key', type=str, default='mimo',
-                        help='LLM config key for data_source coverage check')
     parser.add_argument('--verbose', '-v', action='store_true', default=False)
     args = parser.parse_args()
 
@@ -337,8 +197,7 @@ def main():
     samples = load_samples(args.samples)
     print(f"Loaded {len(records)} sub-question records, {len(samples)} samples")
 
-    audit_records, passed_records = filter_dialogs(records, samples, verbose=args.verbose,
-                                                    config_key=args.config_key)
+    audit_records, passed_records = filter_dialogs(records, samples, verbose=args.verbose)
 
     write_jsonl(args.output_audit, audit_records)
     write_jsonl(args.output_pass, passed_records)

@@ -435,6 +435,7 @@ def _find_table_path(filename: str, dataset_root: str = _DEFAULT_DATASET_ROOT,
     # 2. Sample file_path hint — prefer the candidate that shares the
     #    same parent directory as the sample file.
     if sample_file_path:
+        sample_file_path = sample_file_path.replace('dataset/table/', 'dataset/tables/')
         sample_dir = os.path.dirname(sample_file_path)
         if sample_dir:
             for cp in candidates:

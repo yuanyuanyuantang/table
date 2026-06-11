@@ -2925,8 +2925,6 @@ def revalidate_trajectory(sub_records: list, original_sub_records: list = None,
     return len(issues) == 0, issues, evidence_audit
 
 
-# ---- Convenience: Run full cleaning pipeline on one dialog ----
-
 
 # ---- Convenience: Run full cleaning pipeline on one dialog ----
 
