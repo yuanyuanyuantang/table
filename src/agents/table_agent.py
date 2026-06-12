@@ -350,8 +350,12 @@ class TableAgent:
             
             return AgentAction(
                 action_type="tool",
-                tool_name=action_json.get("tool"),
-                tool_params=action_json.get("params", {}),
+                #曾浩洋修改
+                # tool_name=action_json.get("tool"),
+                # tool_params=action_json.get("params", {}),
+                tool_name=action_json.get("tool") or action_json.get("name"),
+                tool_params=action_json.get("params") or action_json.get("arguments", {}),
+
                 tool_id = action_json.get("call_id", None),
                 thinking=thinking
             )
@@ -368,10 +372,18 @@ class TableAgent:
         if action.action_type == "answer":
             self.state = AgentState.COMPLETED
             return action.answer
-        
+        # 曾浩洋修改
         if action.action_type == "tool":
             if type(action.tool_params) == str:
-                action.tool_params = json.loads(action.tool_params)
+                try:
+                    action.tool_params = json.loads(action.tool_params)
+                except json.JSONDecodeError:
+                    try:
+                        action.tool_params, _ = json.JSONDecoder().raw_decode(action.tool_params)
+                    except json.JSONDecodeError:
+                        self._log(f"[Parse] JSON parse failed for tool params: {str(action.tool_params)[:100]}...")
+                        self.context.conversation.add_tool_result("system", "[ERROR] Tool parameters JSON is malformed, please regenerate the tool call with valid JSON", action.tool_id)
+                        return None
             return self._execute_tool(action.tool_name, action.tool_params or {}, action.tool_id)
         
         if action.action_type == "error":

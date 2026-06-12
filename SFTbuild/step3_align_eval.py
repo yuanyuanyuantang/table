@@ -113,7 +113,7 @@ def main():
                         default=os.path.join(project_root, 'SFTbuild', 'output', 'aligned_subquestions.jsonl'),
                         help='Path to aligned_subquestions.jsonl from step2')
     parser.add_argument('--trace_dir', type=str,
-                        default=os.path.join(project_root, 'traces_output'),
+                        default=os.path.join(project_root, 'traces_output_copy'),
                         help='Directory containing trace JSON files with evaluation')
     parser.add_argument('--output', type=str,
                         default=os.path.join(os.path.dirname(__file__), 'output', 'evaluated_subquestions.jsonl'),

@@ -138,7 +138,8 @@ _STATIC_SYSTEM_PROMPT = (
     "**Current Working Environment Path**: <TABLE_ROOT>, please ensure to use the full path for all operations to avoid path errors. File reading/writing and operations outside the <TABLE_ROOT> directory are prohibited.\n\n"
     "# III. Output Requirements\n"
     "- **Tool-call responses**: When calling tools, first describe your action plan in <PLAN> tags, then output tool calls. Keep plans concise — describe what you intend to do, why, and how (which tools/tables to use).\n"
-    "- **Final response**: Output the answer in JSON format inside <ANSWER> tags, and the updated memory in <MEMORY_AFTER> tags:\n"
+    "- **Final response**: Output the answer in JSON format inside <ANSWER> tags, and the updated memory in <MEMORY_AFTER> tags.\n"
+    "- **Memory**: The user message contains <MEMORY_BEFORE> with the compressed context from previous turns (goal, tables, key facts, derived results, constraints, pitfalls). You will NOT see previous tool calls and observations — rely on <MEMORY_BEFORE>. After answering, update and output <MEMORY_AFTER> for the next turn.\n"
     "<ANSWER>\n"
     '{"answer": "Answer to the user question, providing the answer in text form.", "data_source": ["Table Name 1", "Table Name 2", ...]}\n'
     "</ANSWER>\n"

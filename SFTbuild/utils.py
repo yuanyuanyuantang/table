@@ -307,10 +307,9 @@ def validate_assistant_answer(answer: Any) -> Tuple[dict, list]:
 def extract_step_plan(reasoning_content: str) -> str:
     """从 reasoning_content 提取动作规划，保留完整操作推理。
 
-    截断策略：
+    处理：
       - 去除临时路径（/tmp/data/task_*/），保留操作意图
-      - 保留完整推理链，上限 600 字符
-      - 不限制句子数量，因为操作推理需要多个步骤描述
+      - 保留完整推理链，不做长度截断
     """
     if not reasoning_content:
         return ''
@@ -326,29 +325,7 @@ def extract_step_plan(reasoning_content: str) -> str:
     # Strip "当前的工作环境路径是：<TABLE_ROOT>..." noise
     text = re.sub(r'当前的工作环境路径是：[^。]*。?', '', text)
 
-    cap = 600
-    if len(text) <= cap:
-        return text
-
-    # Split by sentence boundaries, keep as many full sentences as fit
-    sentences = re.split(r'(?<=[。！？!?\n])\s*', text)
-    flat: list = []
-    for s in sentences:
-        parts = s.split('\n')
-        flat.extend(p.strip() for p in parts if p.strip())
-
-    kept: list = []
-    total_chars = 0
-    for s in flat:
-        if total_chars + len(s) > cap:
-            break
-        kept.append(s)
-        total_chars += len(s)
-
-    if not kept:
-        return text[:cap]
-
-    return ' '.join(kept)
+    return text
 
 
 def validate_agent_steps_integrity(steps: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:

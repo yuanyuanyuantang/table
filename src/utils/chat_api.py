@@ -285,7 +285,9 @@ class ChatClient:
                     "extra_content": extra_content
                 })
         return {
-            "reasoning_content": getattr(message, 'reasoning_content', None),
+            # 曾浩洋修改
+            # "reasoning_content": getattr(message, 'reasoning_content', None),
+            "reasoning_content": getattr(message, 'reasoning_content', None) or getattr(message, 'reasoning', None),
             "content": message.content or "",
             "tool_calls": tool_calls or None,
             "finish_reason": finish_reason

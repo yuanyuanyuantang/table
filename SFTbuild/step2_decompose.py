@@ -149,7 +149,7 @@ def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser = argparse.ArgumentParser(description='Step 2: Decompose traces into sub-questions')
     parser.add_argument('--trace_dir', type=str,
-                        default=os.path.join(project_root, 'traces_output'),
+                        default=os.path.join(project_root, 'traces_output_copy'),
                         help='Directory containing trace JSON files')
     parser.add_argument('--samples', type=str,
                         default=os.path.join(project_root, 'dataset', 'samples_normal_easy.json'),

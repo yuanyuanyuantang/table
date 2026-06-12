@@ -259,7 +259,7 @@ Step8 有 5 道门禁，零容忍：
         {                              // type= tool_call
           "agent_step_id": 1,
           "type": "tool_call",
-          "step_plan": "...",         // 动作意图（一句话）
+          "step_plan": "...",         // 动作意图（从模型 reasoning 提取的完整推理链）
           "tool_calls": [
             { tool_call_id, tool_name, arguments }
           ],
@@ -308,12 +308,12 @@ memory_before_{i+1} = memory_after_i，首轮 memory_before 为空。
 **RL 标签说明：**
 - `<MEMORY_BEFORE>` — 当前轮开始时的记忆状态（首轮为 `{}`）
 - `<QUESTION>` — 当前子问题文本
-- `<PLAN>` — 工具调用前的动作意图（一句简短描述）
+- `<PLAN>` — 工具调用前的动作意图（从模型 reasoning 提取的完整推理链）
 - `<ANSWER>` — 最终答案 JSON（含 answer 和 data_source）
 - `<MEMORY_AFTER>` — 当前轮结束后的更新记忆
 
 **关键原则：**
 - score_points / related_tables / evaluation feedback 不进入最终 SFT 样本
-- System prompt 仅含 I-III 节（角色、环境、输出要求），不含 Historical Context
+- System prompt 仅含 I-III 节（角色、环境、输出要求），不含 Historical Context。Section III 包含 Memory 说明，解释 `<MEMORY_BEFORE>` 的作用（替代历史对话）及记忆更新循环
 - 所有路径归一化为 `<TABLE_ROOT>` 占位符，不残留硬编码绝对路径
 - tool_call 格式兼容 OpenAI function calling 标准
