@@ -82,7 +82,7 @@ python SFTbuild/step8_build_sft.py       # 导出 trainable_sft.jsonl + trainabl
 ```bash
 python SFTbuild/step2_decompose.py \
   --trace_dir traces_output \
-  --samples dataset/samples_normal_easy.json \
+  --samples dataset/train不含val的.json \
   --output SFTbuild/output/aligned_subquestions.jsonl
 
 python SFTbuild/step5_repair.py \

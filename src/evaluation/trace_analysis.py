@@ -240,6 +240,23 @@ def _parse_legacy_format(messages):
     return parsed_items
 
 
+def _attach_tool_results(parsed_items, content):
+    """Attach legacy-style tool result messages to pending tool actions."""
+    parts = content.split('[Tool Execution Result')
+    tool_results = []
+    for i, part in enumerate(parts):
+        if part.strip() and i > 0:
+            result = '[Tool Execution Result' + part
+            tool_results.append(result.strip())
+
+    for result in tool_results:
+        for item in parsed_items:
+            if (item.type in ['tool', 'unknown']) and item.result is None:
+                item.result = result
+                item.success = 'success' if '[SUCCESS]' in result else 'failed'
+                break
+
+
 def _parse_openai_format(messages):
     """
     Specifically handle OpenAI format.
@@ -255,8 +272,12 @@ def _parse_openai_format(messages):
         if role == 'system':
             continue
         if role == 'user':
-            # In OpenAI format, user message only contains query
-            if content and ('[ERROR]' in content or '[Tool Execution Result]' in content):
+            # Some traces mix OpenAI tool_calls with legacy user tool results.
+            if content and '[Tool Execution Result' in content:
+                _attach_tool_results(parsed_items, content)
+                continue
+            # In OpenAI format, user message only contains query.
+            if content and '[ERROR]' in content:
                 continue
             turn_count += 1
             parsed_items.append(Action(type="query", turn=turn_count, content=content))
@@ -420,4 +441,3 @@ def get_eval_info(query, eval_file_path):
     except Exception as e:
         print(f"Error reading eval file: {e}")
         return None
-

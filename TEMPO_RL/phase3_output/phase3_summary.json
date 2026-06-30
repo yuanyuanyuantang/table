@@ -1,0 +1,10 @@
+{
+  "n_dialog_rollouts": 10,
+  "n_eligible_boundaries": 18,
+  "n_executed": 8,
+  "n_skipped": 10,
+  "sparse_rate": 0.25,
+  "lambda_cf": 0.2,
+  "tau_f": 0.8,
+  "a": 1.0
+}

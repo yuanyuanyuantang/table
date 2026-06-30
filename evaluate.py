@@ -6,6 +6,7 @@ import time
 import multiprocessing
 import traceback
 import tempfile
+import shutil
 # Add project root directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.evaluation.base_metric import MetricRegistry
@@ -45,9 +46,13 @@ def worker_initializer(req_queue, resp_queue):
     enable_remote_client_mode()
     print(f"[Worker {os.getpid()}] Initialized with shared embedding service")
 
-def link_files_recursively(src_dir, dst_dir):
+def copy_files_recursively(src_dir, dst_dir):
     """
-    Recursively link all files from src_dir to dst_dir
+    Recursively copy all files from src_dir to dst_dir.
+
+    Uses physical copies (shutil.copy2) instead of symlinks so that tool
+    output files written into the table directory stay inside the temp
+    working directory and do not leak back to the source dataset.
     """
     if not os.path.exists(src_dir):
         print(f"[Warning] Source path does not exist: {src_dir}")
@@ -57,16 +62,14 @@ def link_files_recursively(src_dir, dst_dir):
     for root, dirs, files in os.walk(abs_src):
         rel_root = os.path.relpath(root, abs_src)
         target_root = os.path.join(dst_dir, rel_root)
-        
+
         if rel_root != ".":
             os.makedirs(target_root, exist_ok=True)
-            
+
         for file in files:
             src_file = os.path.join(root, file)
             dst_file = os.path.join(target_root, file)
-            if os.path.exists(dst_file):
-                os.remove(dst_file)
-            os.symlink(src_file, dst_file)
+            shutil.copy2(src_file, dst_file)
 
 def run_single_eval(args_tuple):
     """
@@ -86,7 +89,7 @@ def run_single_eval(args_tuple):
         with tempfile.TemporaryDirectory(dir=TMP_ROOT, prefix=f"task_") as task_work_dir:
             target_path = os.path.join(task_work_dir, original_table_path)
             os.makedirs(target_path, exist_ok=True)
-            link_files_recursively(original_table_path, target_path)
+            copy_files_recursively(original_table_path, target_path)
             sample['file_path'] = target_path
             
             user_config = UserAgentConfig(

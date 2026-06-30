@@ -1,0 +1,41 @@
+# LLaMA-Factory SFT training config — full fine-tune for table-agent
+# Usage:
+#   llamafactory-cli train TEMPO_SFT/train_config.yaml
+
+### Model
+model_name_or_path: models/Qwen3-0.6B
+template: qwen
+trust_remote_code: true
+
+### Data
+dataset: table_agent_sft
+dataset_dir: TEMPO_SFT
+cutoff_len: 8192
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+### Training
+stage: sft
+do_train: true
+finetuning_type: full
+output_dir: models/table-agent-sft-llama
+
+# Training hyperparams
+num_train_epochs: 3
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 2.0e-5
+warmup_ratio: 0.05
+lr_scheduler_type: cosine
+logging_steps: 1
+save_strategy: epoch
+save_total_limit: 3
+
+# Precision
+bf16: true
+fp16: false
+
+# Misc
+seed: 42
+report_to: none
+dataloader_pin_memory: false

@@ -115,15 +115,15 @@ class ChatClient:
 
         model = cfg.get("model") or cfg.get("model_name")
         if provider == "azure":
-            self.client = AzureOpenAI(azure_endpoint=cfg["base_url"], api_key=cfg["api_key"], api_version=api_version)
+            self.client = AzureOpenAI(azure_endpoint=cfg["base_url"], api_key=cfg["api_key"], api_version=api_version, timeout=120.0)
             self.model = model
             self.provider = "azure"
         elif provider == "vllm":
-            self.client = OpenAI(base_url=cfg["base_url"], api_key=cfg.get("api_key", ""))
+            self.client = OpenAI(base_url=cfg["base_url"], api_key=cfg.get("api_key", ""), timeout=120.0)
             self.model = model
             self.provider = "vllm"
         elif provider == "openai":
-            self.client = OpenAI(api_key=cfg.get("api_key", ""), base_url=cfg.get("base_url", "https://api.openai.com"))
+            self.client = OpenAI(api_key=cfg.get("api_key", ""), base_url=cfg.get("base_url", "https://api.openai.com"), timeout=120.0)
             self.model = model
             self.provider = "openai"
         else:
@@ -668,7 +668,7 @@ class ChatClient:
                     end_idx = min(start_idx + current_batch_size, total_pending)
                     batch = pending_items[start_idx:end_idx]
                     futs = [ex.submit(_run_and_cache, i, p, k) for i, p, k in batch]
-                    for f in as_completed(futs):
+                    for f in as_completed(futs, timeout=180):
                         i, out = f.result()
                         results[i] = out
         return results
